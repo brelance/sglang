@@ -2,7 +2,7 @@ import atexit
 import json
 import multiprocessing
 import warnings
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Any
 
 import aiohttp
 import requests
@@ -148,18 +148,14 @@ class RuntimeEndpoint(BaseBackend):
 
         dtype_regex = None
         if sampling_params.dtype in ["int", int]:
-
             dtype_regex = REGEX_INT
             sampling_params.stop.extend([" ", "\n"])
         elif sampling_params.dtype in ["float", float]:
-
             dtype_regex = REGEX_FLOAT
             sampling_params.stop.extend([" ", "\n"])
         elif sampling_params.dtype in ["str", str]:
-
             dtype_regex = REGEX_STR
         elif sampling_params.dtype in ["bool", bool]:
-
             dtype_regex = REGEX_BOOL
         else:
             raise RuntimeError(f"Invalid dtype: {sampling_params.dtype}")
@@ -445,7 +441,9 @@ class Runtime:
     def stop_profile(self):
         self.endpoint.stop_profile()
 
-    def dump_radix_tree(self, path: Optional[str] = None, meta: Optional[Dict[str, Any]] = None):
+    def dump_radix_tree(
+        self, path: Optional[str] = None, meta: Optional[Dict[str, Any]] = None
+    ):
         return self.endpoint.dump_radix_tree(path=path, meta=meta)
 
     def cache_prefix(self, prefix: str):
