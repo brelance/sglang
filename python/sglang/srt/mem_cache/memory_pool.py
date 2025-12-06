@@ -81,7 +81,6 @@ class ReqToTokenPool:
         device: str,
         enable_memory_saver: bool,
     ):
-
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=enable_memory_saver
         )
@@ -416,9 +415,9 @@ class HybridReqToTokenPool(ReqToTokenPool):
                 req.mamba_pool_idx = mid
             if mid is not None:
                 mamba_index.append(mid)
-        assert len(select_index) == len(
-            mamba_index
-        ), f"Not enough space for mamba cache, try to increase --max-mamba-cache-size."
+        assert len(select_index) == len(mamba_index), (
+            f"Not enough space for mamba cache, try to increase --max-mamba-cache-size."
+        )
         self.req_index_to_mamba_index_mapping[select_index] = torch.tensor(
             mamba_index, dtype=torch.int32, device=self.device
         )
@@ -545,7 +544,6 @@ class KVCache(abc.ABC):
 
 
 class MHATokenToKVPool(KVCache):
-
     def __init__(
         self,
         size: int,
@@ -901,9 +899,9 @@ class MHATokenToKVPool(KVCache):
             with self.device_module.stream(self.alt_stream):
                 self.v_buffer[layer_id - self.start_layer][loc] = cache_v
                 if is_float4_e2m1fn_x2(self.dtype):
-                    self.v_scale_buffer[layer_id - self.start_layer][
-                        loc
-                    ] = cache_v_fp4_sf
+                    self.v_scale_buffer[layer_id - self.start_layer][loc] = (
+                        cache_v_fp4_sf
+                    )
             current_stream.wait_stream(self.alt_stream)
         else:
             self.k_buffer[layer_id - self.start_layer][loc] = cache_k
@@ -917,9 +915,9 @@ class MHATokenToKVPool(KVCache):
         if N == 0:
             return
 
-        assert (
-            self._kv_copy_config is not None
-        ), "KV copy not initialized. Set enable_kv_cache_copy=True in __init__"
+        assert self._kv_copy_config is not None, (
+            "KV copy not initialized. Set enable_kv_cache_copy=True in __init__"
+        )
 
         cfg = self._kv_copy_config
         N_upper = next_power_of_2(N)
@@ -1043,7 +1041,6 @@ class HybridLinearKVPool(KVCache):
 
     @contextmanager
     def _transfer_id_context(self, layer: RadixAttention):
-
         @contextmanager
         def _patch_layer_id(layer):
             original_layer_id = layer.layer_id
@@ -1233,7 +1230,6 @@ class SWAKVPool(KVCache):
         k_scale: float = 1.0,
         v_scale: float = 1.0,
     ):
-
         layer_id = layer.layer_id
         layer_id_pool, is_swa = self.layers_mapping[layer_id]
         if is_swa:
@@ -1261,7 +1257,6 @@ class SWAKVPool(KVCache):
 
 
 class AscendTokenToKVPool(MHATokenToKVPool):
-
     def _create_buffers(self):
         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
             # [size, head_num, head_dim] for each layer
@@ -1380,9 +1375,9 @@ class MLATokenToKVPool(KVCache):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.use_nsa = use_nsa
         self.nsa_kv_cache_store_fp8 = use_nsa and dtype == torch.float8_e4m3fn
-        assert not (
-            self.nsa_kv_cache_store_fp8 and override_kv_cache_dim is None
-        ), "override_kv_cache_dim must be provided when using NSA with FP8 kv cache storage"
+        assert not (self.nsa_kv_cache_store_fp8 and override_kv_cache_dim is None), (
+            "override_kv_cache_dim must be provided when using NSA with FP8 kv cache storage"
+        )
         self.kv_cache_dim = (
             override_kv_cache_dim
             if self.use_nsa and self.nsa_kv_cache_store_fp8
@@ -1657,9 +1652,9 @@ class NSATokenToKVPool(MLATokenToKVPool):
         start_layer: Optional[int] = None,
         end_layer: Optional[int] = None,
     ):
-        assert (
-            kv_lora_rank % self.quant_block_size == 0
-        ), f"kv_lora_rank {kv_lora_rank} must be multiple of quant_block_size {self.quant_block_size}"
+        assert kv_lora_rank % self.quant_block_size == 0, (
+            f"kv_lora_rank {kv_lora_rank} must be multiple of quant_block_size {self.quant_block_size}"
+        )
 
         # Calculate override_kv_cache_dim for FP8 storage:
         # kv_lora_rank + scale storage (kv_lora_rank // quant_block_size * 4 bytes) + rope dimension storage

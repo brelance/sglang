@@ -64,6 +64,22 @@ class RuntimeEndpoint(BaseBackend):
         )
         self._assert_success(res)
 
+    def dump_radix_tree(self, path: str | None = None, meta: dict | None = None):
+        payload = {}
+        if path is not None:
+            payload["path"] = path
+        if meta is not None:
+            payload["meta"] = meta
+        res = http_request(
+            self.base_url + "/dump_radix_tree",
+            api_key=self.api_key,
+            verify=self.verify,
+            method="POST",
+            json=payload if payload else None,
+        )
+        self._assert_success(res)
+        return res.json()
+
     def get_server_info(self):
         res = http_request(
             self.base_url + "/get_server_info",
@@ -428,6 +444,9 @@ class Runtime:
 
     def stop_profile(self):
         self.endpoint.stop_profile()
+
+    def dump_radix_tree(self, path: Optional[str] = None, meta: Optional[Dict[str, Any]] = None):
+        return self.endpoint.dump_radix_tree(path=path, meta=meta)
 
     def cache_prefix(self, prefix: str):
         self.endpoint.cache_prefix(prefix)

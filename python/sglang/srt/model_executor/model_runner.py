@@ -329,9 +329,9 @@ class ModelRunner:
         )
 
         if self.pp_size > 1:
-            assert (
-                self.support_pp
-            ), "Pipeline Parallel is not compatible with this model."
+            assert self.support_pp, (
+                "Pipeline Parallel is not compatible with this model."
+            )
 
         # For weight updates
         self._model_update_group = {}
@@ -953,15 +953,15 @@ class ModelRunner:
         group_name,
         backend="nccl",
     ):
-        assert (
-            torch.distributed.is_initialized()
-        ), "Default torch process group must be initialized"
+        assert torch.distributed.is_initialized(), (
+            "Default torch process group must be initialized"
+        )
         assert group_name != "", "Group name cannot be empty"
 
         ports_list = ports.split(",")
-        assert (
-            len(ports_list) == self.tp_size
-        ), f"Expected {self.tp_size} ports, but got {len(ports_list)} ports."
+        assert len(ports_list) == self.tp_size, (
+            f"Expected {self.tp_size} ports, but got {len(ports_list)} ports."
+        )
         group_port = ports_list[self.tp_rank]
         group_name = f"{group_name}_{group_port}_{self.tp_rank}"
 
@@ -1000,15 +1000,15 @@ class ModelRunner:
         ports,
         group_name,
     ):
-        assert (
-            torch.distributed.is_initialized()
-        ), "Default torch process group must be initialized"
+        assert torch.distributed.is_initialized(), (
+            "Default torch process group must be initialized"
+        )
         assert group_name != "", "Group name cannot be empty"
 
         ports_list = ports.split(",")
-        assert (
-            len(ports_list) == self.tp_size
-        ), f"Expected {self.tp_size} ports, but got {len(ports_list)} ports."
+        assert len(ports_list) == self.tp_size, (
+            f"Expected {self.tp_size} ports, but got {len(ports_list)} ports."
+        )
         group_port = ports_list[self.tp_rank]
         group_name = f"{group_name}_{group_port}_{self.tp_rank}"
 
@@ -1060,9 +1060,9 @@ class ModelRunner:
         weights/parameters online, and broadcasts them to the inference
         engine through the `_model_update_group` process group.
         """
-        assert (
-            torch.distributed.is_initialized()
-        ), "Default torch process group must be initialized"
+        assert torch.distributed.is_initialized(), (
+            "Default torch process group must be initialized"
+        )
         assert group_name != "", "Group name cannot be empty"
 
         rank = rank_offset + self.tp_rank
@@ -1842,6 +1842,7 @@ class ModelRunner:
                     **extra_args,
                 )
             else:
+                # TODO: MHATokenToKVPool
                 self.token_to_kv_pool = MHATokenToKVPool(
                     self.max_total_num_tokens,
                     page_size=self.page_size,
@@ -1888,6 +1889,7 @@ class ModelRunner:
                             need_sort=need_sort,
                         )
                     else:
+                        # TODO: TokenToKvPoolAllocator
                         self.token_to_kv_pool_allocator = TokenToKVPoolAllocator(
                             self.max_total_num_tokens,
                             dtype=self.kv_cache_dtype,

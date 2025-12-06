@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 class HiRadixCache(RadixCache):
-
     def __init__(
         self,
         req_to_token_pool: ReqToTokenPool,
@@ -46,7 +45,6 @@ class HiRadixCache(RadixCache):
         storage_backend_extra_config: Optional[str] = None,
         is_eagle: bool = False,
     ):
-
         if hicache_io_backend == "direct":
             if hicache_mem_layout == "page_first":
                 hicache_mem_layout = "page_first_direct"
@@ -433,9 +431,9 @@ class HiRadixCache(RadixCache):
         last_hit_node = node
         nodes_to_load = []
         while node.evicted:
-            assert (
-                node.backuped
-            ), "No backup available on evicted nodes, should not happen"
+            assert node.backuped, (
+                "No backup available on evicted nodes, should not happen"
+            )
             nodes_to_load.insert(0, node)
             node = node.parent
         else:
@@ -903,9 +901,9 @@ class HiRadixCache(RadixCache):
 
             if self.enable_storage:
                 last_hash = node.get_last_hash_value()
-                assert (node == self.root_node) or (
-                    last_hash is not None
-                ), "Parent node must have a hash value with storage enabled"
+                assert (node == self.root_node) or (last_hash is not None), (
+                    "Parent node must have a hash value with storage enabled"
+                )
                 new_node.hash_value = []
                 for idx in range(0, len(key), self.page_size):
                     new_node.hash_value.append(

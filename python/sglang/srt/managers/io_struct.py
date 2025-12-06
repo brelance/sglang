@@ -1065,6 +1065,19 @@ class FlushCacheReqOutput(BaseReq):
 
 
 @dataclass
+class DumpRadixTraceReqInput(BaseReq):
+    path: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class DumpRadixTraceReqOutput(BaseReq):
+    success: bool
+    path: Optional[str] = None
+    message: str = ""
+
+
+@dataclass
 class UpdateWeightFromDiskReqInput(BaseReq):
     # The model path with the new weights
     model_path: str

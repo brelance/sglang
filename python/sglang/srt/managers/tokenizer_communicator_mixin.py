@@ -30,6 +30,8 @@ from sglang.srt.managers.io_struct import (
     ExpertDistributionReq,
     ExpertDistributionReqOutput,
     ExpertDistributionReqType,
+    DumpRadixTraceReqInput,
+    DumpRadixTraceReqOutput,
     FlushCacheReqInput,
     FlushCacheReqOutput,
     GetInternalStateReq,
@@ -189,6 +191,9 @@ class TokenizerCommunicatorMixin:
         self.flush_cache_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
+        self.dump_radix_tree_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
         self.clear_hicache_storage_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
@@ -269,6 +274,10 @@ class TokenizerCommunicatorMixin:
                     self.flush_cache_communicator.handle_recv,
                 ),
                 (
+                    DumpRadixTraceReqOutput,
+                    self.dump_radix_tree_communicator.handle_recv,
+                ),
+                (
                     ProfileReqOutput,
                     self.profile_communicator.handle_recv,
                 ),
@@ -297,6 +306,17 @@ class TokenizerCommunicatorMixin:
 
     async def flush_cache(self: TokenizerManager) -> FlushCacheReqOutput:
         return (await self.flush_cache_communicator(FlushCacheReqInput()))[0]
+
+    async def dump_radix_tree_trace(
+        self: TokenizerManager,
+        path: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> DumpRadixTraceReqOutput:
+        return (
+            await self.dump_radix_tree_communicator(
+                DumpRadixTraceReqInput(path=path, meta=meta)
+            )
+        )[0]
 
     async def clear_hicache_storage(self: TokenizerManager) -> ClearHiCacheReqOutput:
         """Clear the hierarchical cache storage."""

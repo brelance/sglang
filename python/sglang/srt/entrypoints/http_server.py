@@ -633,6 +633,26 @@ async def flush_cache():
     )
 
 
+@app.api_route("/dump_radix_tree", methods=["GET", "POST"])
+async def dump_radix_tree(request: Request):
+    """Dump the current radix tree snapshot to JSONL file."""
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
+    path = payload.get("path") if isinstance(payload, dict) else None
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+
+    ret = await _global_state.tokenizer_manager.dump_radix_tree_trace(
+        path=path, meta=meta
+    )
+    return ORJSONResponse(
+        {"success": ret.success, "path": ret.path, "message": ret.message},
+        status_code=200 if ret.success else HTTPStatus.BAD_REQUEST,
+    )
+
+
 @app.api_route("/clear_hicache_storage_backend", methods=["GET", "POST"])
 async def clear_hicache_storage_backend():
     """Clear the hierarchical cache storage backend."""

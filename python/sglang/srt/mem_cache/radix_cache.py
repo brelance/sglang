@@ -23,7 +23,7 @@ import heapq
 import time
 from collections import defaultdict
 from functools import lru_cache, partial
-from typing import TYPE_CHECKING, Iterator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
 
@@ -43,6 +43,10 @@ from sglang.srt.mem_cache.evict_policy import (
     MRUStrategy,
 )
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
+from sglang.srt.mem_cache.radix_tree_tracer import (
+    DEFAULT_TRACE_PATH,
+    RadixTreeTracer,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -182,6 +186,12 @@ def _convert_to_bigram_key(tokens: List[int]) -> List[Tuple[int, int]]:
     if isinstance(tokens[0], tuple):
         return tokens
     return [(tokens[i], tokens[i + 1]) for i in range(len(tokens) - 1)]
+
+
+def _serialize_token_for_json(token: Any):
+    if isinstance(token, tuple):
+        return list(token)
+    return token
 
 
 class RadixCache(BasePrefixCache):
@@ -559,6 +569,75 @@ class RadixCache(BasePrefixCache):
 
         _dfs_helper(self.root_node)
         return torch.cat(values)
+
+    def build_tree_snapshot(self, meta: Optional[Dict[str, Any]] = None):
+        """Build a JSON-serializable snapshot of the current radix tree."""
+        nodes = []
+        edges = []
+        total_value_tokens = 0
+        snapshot_time = time.time()
+        stack = [(self.root_node, None)]
+
+        while stack:
+            node, parent_id = stack.pop()
+            node_id = node.id
+
+            key_tokens = []
+            key_extra = None
+            if node.key is not None:
+                key_tokens = [
+                    _serialize_token_for_json(t) for t in node.key.token_ids
+                ]
+                key_extra = node.key.extra_key
+
+            value_len = len(node.value) if node.value is not None else 0
+            total_value_tokens += value_len
+
+            nodes.append(
+                {
+                    "node_id": node_id,
+                    "parent_id": parent_id,
+                    "tokens": key_tokens,
+                    "extra_key": key_extra,
+                    "key_len": len(node.key) if node.key is not None else 0,
+                    "value_len": value_len,
+                    "lock_ref": node.lock_ref,
+                    "hit_count": node.hit_count,
+                    "evicted": node.evicted,
+                    "backuped": node.backuped,
+                    "creation_time": node.creation_time,
+                    "last_access_time": node.last_access_time,
+                    "children_count": len(node.children),
+                }
+            )
+
+            for child in node.children.values():
+                edges.append((node_id, child.id))
+                stack.append((child, node_id))
+
+        snapshot = {
+            "meta": {
+                "timestamp": snapshot_time,
+                "page_size": self.page_size,
+                "is_eagle": self.is_eagle,
+                "node_count": len(nodes),
+                "total_value_tokens": total_value_tokens,
+            },
+            "nodes": nodes,
+            "edges": edges,
+        }
+
+        if meta:
+            snapshot["meta"].update(meta)
+
+        return snapshot
+
+    def dump_trace(self, path: str = DEFAULT_TRACE_PATH, meta: Optional[Dict[str, Any]] = None):
+        """Dump the current radix tree snapshot to JSONL file."""
+        tracer = RadixTreeTracer(path)
+        snapshot = self.build_tree_snapshot(meta=meta)
+        tracer.dump(snapshot, path=path)
+        return path
 
     ##### Internal Helper Functions #####
 
