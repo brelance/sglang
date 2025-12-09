@@ -29,9 +29,14 @@ ScheduleBatch -> ModelWorkerBatch -> ForwardBatch
 
 from __future__ import annotations
 
+import json
+import logging
+import time
+import uuid
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from functools import total_ordering
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -200,6 +205,8 @@ class ForwardBatch:
 
     # The sum of all sequence lengths
     seq_lens_sum: int
+    # Request ids in the same order as seq_lens
+    req_ids: Optional[List[str]] = None
 
     # The original sequence length without being chunked. Qwen-1M related.
     orig_seq_lens: Optional[torch.Tensor] = None
@@ -370,6 +377,7 @@ class ForwardBatch:
             global_forward_mode=batch.global_forward_mode,
             is_prefill_only=batch.is_prefill_only,
             lora_ids=batch.lora_ids,
+            req_ids=batch.req_ids,
             sampling_info=batch.sampling_info,
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
@@ -424,6 +432,7 @@ class ForwardBatch:
             TboForwardBatchPreparer.prepare(
                 ret, is_draft_worker=model_runner.is_draft_worker
             )
+            cls._persist_forward_batch(ret)
             return ret
 
         # Override the positions with spec_info
@@ -476,7 +485,69 @@ class ForwardBatch:
             ret, is_draft_worker=model_runner.is_draft_worker
         )
 
+        cls._persist_forward_batch(ret)
         return ret
+
+    @classmethod
+    def _persist_forward_batch(cls, forward_batch: ForwardBatch) -> None:
+        """Best-effort persistence of ForwardBatch metadata to JSON."""
+
+        def _tensor_summary(
+            t: Optional[torch.Tensor],
+        ) -> Optional[Dict[str, Union[str, List[int], List[float]]]]:
+            if t is None:
+                return None
+            try:
+                preview_elems = min(t.numel(), 8)
+                preview: Optional[List[float]] = None
+                if preview_elems > 0:
+                    preview = t.detach().flatten().to("cpu").tolist()[:preview_elems]
+                return {
+                    "shape": list(t.shape),
+                    "dtype": str(t.dtype),
+                    "device": str(t.device),
+                    "preview": preview,
+                }
+            except Exception:
+                return {
+                    "shape": list(t.shape),
+                    "dtype": str(t.dtype),
+                    "device": str(t.device),
+                    "preview": None,
+                }
+
+        def _safe_serialize(obj):
+            if obj is None:
+                return None
+            if isinstance(obj, (int, float, str, bool)):
+                return obj
+            if isinstance(obj, IntEnum):
+                return obj.name
+            if isinstance(obj, torch.Tensor):
+                return _tensor_summary(obj)
+            if isinstance(obj, (list, tuple)):
+                return [_safe_serialize(x) for x in obj]
+            if isinstance(obj, dict):
+                return {str(k): _safe_serialize(v) for k, v in obj.items()}
+            return str(obj)
+
+        payload = {k: _safe_serialize(v) for k, v in forward_batch.__dict__.items()}
+        payload["timestamp_ns"] = time.time_ns()
+
+        trace_dir = Path("traces") / "forwardBatch"
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        filename = (
+            trace_dir
+            / f"{payload['timestamp_ns']}_{forward_batch.forward_mode.name}_{uuid.uuid4().hex}.json"
+        )
+
+        try:
+            with filename.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to persist ForwardBatch trace to %s", filename
+            )
 
     def merge_mm_inputs(self) -> Optional[MultimodalInputs]:
         """
@@ -839,7 +910,6 @@ class ForwardBatch:
         self._pad_inputs_to_size(model_runner, tokens_padded, self.batch_size)
 
     def post_forward_mlp_sync_batch(self, logits_output: LogitsProcessorOutput):
-
         self.forward_mode = getattr(self, "_original_forward_mode", self.forward_mode)
         self.batch_size = getattr(self, "_original_batch_size", self.batch_size)
         bs = self.batch_size
@@ -922,12 +992,11 @@ class ForwardBatch:
     # Called before each attention module if using chunked kv cache for prefill
     # Some of the codes are adapted from https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/common.py
     def prepare_chunked_prefix_cache_info(self, device: torch.device):
-
         from sglang.srt.mem_cache.memory_pool import MLATokenToKVPool
 
-        assert isinstance(
-            self.token_to_kv_pool, MLATokenToKVPool
-        ), "Currently chunked prefix cache can only be used by Deepseek models"
+        assert isinstance(self.token_to_kv_pool, MLATokenToKVPool), (
+            "Currently chunked prefix cache can only be used by Deepseek models"
+        )
 
         if not any(self.extend_prefix_lens_cpu):
             self.num_prefix_chunks = 0
