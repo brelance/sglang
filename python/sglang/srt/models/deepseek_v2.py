@@ -83,6 +83,7 @@ from sglang.srt.layers.moe.ep_moe.layer import DeepEPMoE, get_moe_impl_class
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.moe.kt_ep_wrapper import KTEPWrapperMethod
 from sglang.srt.layers.moe.topk import TopK, TopKOutputFormat
+from sglang.srt.loggers.radix_moe_logger import get_radix_moe_logger
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.quantization.fp8_kernel import (
@@ -736,6 +737,7 @@ class DeepseekV2MoE(nn.Module):
             get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mooncake()
         )
         self._fuse_shared_experts_inside_sbo = SboFlags.fuse_shared_experts_inside_sbo()
+        self.radix_moe_logger = get_radix_moe_logger()
 
     def get_moe_weights(self):
         return [
@@ -765,6 +767,7 @@ class DeepseekV2MoE(nn.Module):
                     should_allreduce_fusion,
                     use_reduce_scatter,
                     gemm_output_zero_allocator,
+                    forward_batch=forward_batch,
                 )
             else:
                 return self.forward_normal(
@@ -772,6 +775,7 @@ class DeepseekV2MoE(nn.Module):
                     should_allreduce_fusion,
                     use_reduce_scatter,
                     gemm_output_zero_allocator,
+                    forward_batch=forward_batch,
                 )
         else:
             return self.forward_deepep(hidden_states, forward_batch)
@@ -782,6 +786,7 @@ class DeepseekV2MoE(nn.Module):
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
         gemm_output_zero_allocator: BumpAllocator = None,
+        forward_batch: Optional[ForwardBatch] = None,
     ) -> torch.Tensor:
 
         current_stream = torch.cuda.current_stream()
@@ -794,6 +799,7 @@ class DeepseekV2MoE(nn.Module):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
             topk_output = self.topk(hidden_states, router_logits)
+            self._log_moe_selection(forward_batch, topk_output)
             final_hidden_states = self.experts(hidden_states, topk_output)
             if not _is_cuda or isinstance(self.experts.quant_method, KTEPWrapperMethod):
                 final_hidden_states *= self.routed_scaling_factor
@@ -815,11 +821,14 @@ class DeepseekV2MoE(nn.Module):
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
         gemm_output_zero_allocator: BumpAllocator = None,
+        forward_batch: Optional[ForwardBatch] = None,
     ) -> torch.Tensor:
         if hasattr(self, "shared_experts") and use_intel_amx_backend(
             self.shared_experts.gate_up_proj
         ):
-            return self.forward_cpu(hidden_states, should_allreduce_fusion)
+            return self.forward_cpu(
+                hidden_states, should_allreduce_fusion, forward_batch=forward_batch
+            )
 
         if hidden_states.shape[0] > 0:
             if not self._fuse_shared_experts_inside_sbo:
@@ -829,6 +838,7 @@ class DeepseekV2MoE(nn.Module):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
             topk_output = self.topk(hidden_states, router_logits)
+            self._log_moe_selection(forward_batch, topk_output)
         else:
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
@@ -876,10 +886,12 @@ class DeepseekV2MoE(nn.Module):
         self,
         hidden_states: torch.Tensor,
         should_allreduce_fusion: bool = False,
+        forward_batch: Optional[ForwardBatch] = None,
     ) -> torch.Tensor:
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
+        self._log_moe_selection(forward_batch, topk_output)
         fused_experts_out = self.experts(
             hidden_states=hidden_states, topk_output=topk_output
         )
@@ -930,6 +942,80 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states
 
+    def _log_moe_selection(
+        self,
+        forward_batch: Optional[ForwardBatch],
+        topk_output,
+    ):
+        logger = getattr(self, "radix_moe_logger", None)
+        if logger is None or not logger.is_enabled():
+            return
+        if forward_batch is None or not forward_batch.req_ids:
+            return
+        if topk_output is None or getattr(topk_output, "format", None) != TopKOutputFormat.STANDARD:
+            return
+
+        seq_lens_source = forward_batch.seq_lens_cpu
+        if seq_lens_source is None:
+            seq_lens_source = forward_batch.seq_lens
+        if seq_lens_source is None:
+            return
+        if isinstance(seq_lens_source, torch.Tensor):
+            seq_lens_list = [int(x) for x in seq_lens_source.tolist()]
+        else:
+            seq_lens_list = [int(x) for x in seq_lens_source]
+        if not seq_lens_list:
+            return
+
+        try:
+            topk_ids = topk_output.topk_ids.detach().cpu()
+            topk_weights = topk_output.topk_weights.detach().cpu()
+        except Exception:
+            return
+
+        total_tokens = topk_ids.shape[0]
+        offset = 0
+        for rid, length in zip(forward_batch.req_ids, seq_lens_list):
+            length = max(0, int(length))
+            if length == 0:
+                continue
+            start = offset
+            end = min(start + length, total_tokens)
+            offset = start + length
+            if end <= start:
+                continue
+
+            ids_slice = topk_ids[start:end]
+            weights_slice = topk_weights[start:end]
+            expert_counts: Dict[int, int] = {}
+            expert_scores: Dict[int, float] = {}
+            for ids_row, score_row in zip(
+                ids_slice.tolist(), weights_slice.tolist()
+            ):
+                for expert_id, score in zip(ids_row, score_row):
+                    expert_counts[expert_id] = expert_counts.get(expert_id, 0) + 1
+                    expert_scores[expert_id] = expert_scores.get(expert_id, 0.0) + float(
+                        score
+                    )
+            if not expert_counts:
+                continue
+            experts = sorted(expert_counts.keys())
+            counts = [expert_counts[e] for e in experts]
+            avg_scores = [
+                expert_scores[e] / expert_counts[e] if expert_counts[e] else 0.0
+                for e in experts
+            ]
+            logger.log_moe_selection(
+                {
+                    "req_id": rid,
+                    "layer": self.layer_id,
+                    "experts": experts,
+                    "counts": counts,
+                    "avg_scores": avg_scores,
+                    "token_count": end - start,
+                }
+            )
+
     def forward_deepep(
         self,
         hidden_states: torch.Tensor,
@@ -949,6 +1035,7 @@ class DeepseekV2MoE(nn.Module):
                     layer_id=self.layer_id,
                 ),
             )
+            self._log_moe_selection(forward_batch, topk_output)
         else:
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 

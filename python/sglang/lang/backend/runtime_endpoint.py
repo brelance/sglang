@@ -2,7 +2,7 @@ import atexit
 import json
 import multiprocessing
 import warnings
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
 import requests

@@ -21,6 +21,7 @@ from sglang.srt.managers.schedule_batch import (
     ScheduleBatch,
 )
 from sglang.srt.mem_cache.common import release_kv_cache
+from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.tracing.trace import trace_slice, trace_slice_batch, trace_slice_end
 
 if TYPE_CHECKING:
@@ -111,33 +112,34 @@ class SchedulerOutputProcessorMixin:
                     req.output_ids.append(next_token_id)
                     req.check_finished()
 
-                    if req.finished():
-                        release_kv_cache(req, self.tree_cache)
-                        req.time_stats.completion_time = time.perf_counter()
-                    elif not batch.decoding_reqs or req not in batch.decoding_reqs:
-                        # This updates radix so others can match
-                        self.tree_cache.cache_unfinished_req(req)
+                if req.finished():
+                    self._log_radix_path_for_request(req)
+                    release_kv_cache(req, self.tree_cache)
+                    req.time_stats.completion_time = time.perf_counter()
+                elif not batch.decoding_reqs or req not in batch.decoding_reqs:
+                    # This updates radix so others can match
+                    self.tree_cache.cache_unfinished_req(req)
 
-                    if batch.return_logprob:
-                        assert extend_logprob_start_len_per_req is not None
-                        assert extend_input_len_per_req is not None
-                        extend_logprob_start_len = extend_logprob_start_len_per_req[i]
-                        extend_input_len = extend_input_len_per_req[i]
+                if batch.return_logprob:
+                    assert extend_logprob_start_len_per_req is not None
+                    assert extend_input_len_per_req is not None
+                    extend_logprob_start_len = extend_logprob_start_len_per_req[i]
+                    extend_input_len = extend_input_len_per_req[i]
 
-                        num_input_logprobs = self._calculate_num_input_logprobs(
-                            req, extend_input_len, extend_logprob_start_len
+                    num_input_logprobs = self._calculate_num_input_logprobs(
+                        req, extend_input_len, extend_logprob_start_len
+                    )
+
+                    if req.return_logprob:
+                        self.add_logprob_return_values(
+                            i,
+                            req,
+                            logprob_pt,
+                            next_token_ids,
+                            num_input_logprobs,
+                            logits_output,
                         )
-
-                        if req.return_logprob:
-                            self.add_logprob_return_values(
-                                i,
-                                req,
-                                logprob_pt,
-                                next_token_ids,
-                                num_input_logprobs,
-                                logits_output,
-                            )
-                        logprob_pt += num_input_logprobs
+                    logprob_pt += num_input_logprobs
 
                     if (
                         req.return_hidden_states
@@ -482,6 +484,54 @@ class SchedulerOutputProcessorMixin:
         # Clean up temp storage
         req.temp_input_token_ids_logprobs_idx = None
         req.temp_input_token_ids_logprobs_val = None
+
+    def _log_radix_path_for_request(self: Scheduler, req: Req):
+        logger = getattr(self, "radix_moe_logger", None)
+        if logger is None or not logger.is_enabled():
+            return
+        tree_cache = getattr(self, "tree_cache", None)
+        if tree_cache is None or getattr(tree_cache, "disable", False):
+            return
+        token_ids = list(req.origin_input_ids)
+        token_ids.extend(req.output_ids)
+        if not token_ids:
+            return
+        key = RadixKey(token_ids=list(token_ids), extra_key=req.extra_key)
+        try:
+            match_result = tree_cache.match_prefix(key)
+        except Exception:
+            return
+        last_node = getattr(match_result, "last_device_node", None)
+        if last_node is None:
+            return
+        path_ids = self._collect_node_path_ids(last_node)
+        device_indices = getattr(match_result, "device_indices", None)
+        match_len = 0
+        if device_indices is not None:
+            match_len = (
+                int(device_indices.numel())
+                if hasattr(device_indices, "numel")
+                else len(device_indices)
+            )
+        logger.log_radix_path(
+            req_id=req.rid,
+            matched_path=path_ids,
+            match_len=match_len,
+            match_depth=max(0, len(path_ids) - 1),
+        )
+
+    def _collect_node_path_ids(self: Scheduler, node) -> List[int]:
+        path: List[int] = []
+        current = node
+        visited = 0
+        while current is not None and visited < 100000:
+            node_id = getattr(current, "id", None)
+            if node_id is None:
+                break
+            path.append(int(node_id))
+            current = getattr(current, "parent", None)
+            visited += 1
+        return list(reversed(path))
 
     def _calculate_relevant_tokens_len(self, req: Req) -> int:
         """Calculate the expected length of logprob arrays based on whether multi-item scoring is enabled.
