@@ -377,7 +377,6 @@ class ForwardBatch:
             global_forward_mode=batch.global_forward_mode,
             is_prefill_only=batch.is_prefill_only,
             lora_ids=batch.lora_ids,
-            req_ids=batch.req_ids,
             sampling_info=batch.sampling_info,
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
