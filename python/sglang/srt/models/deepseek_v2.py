@@ -961,6 +961,8 @@ class DeepseekV2MoE(nn.Module):
         if seq_lens_source is None:
             return
         if isinstance(seq_lens_source, torch.Tensor):
+            if seq_lens_source.device.type != "cpu":
+                seq_lens_source = seq_lens_source.detach().cpu()
             seq_lens_list = [int(x) for x in seq_lens_source.tolist()]
         else:
             seq_lens_list = [int(x) for x in seq_lens_source]
