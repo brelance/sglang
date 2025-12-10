@@ -658,6 +658,63 @@ class TestRadixCache(unittest.TestCase):
                 result_branch = cache.match_prefix(RadixKey(seq2))
                 torch.testing.assert_close(result_branch.device_indices, val2)
 
+    def test_match_increments_hit_count(self):
+        """Ensure prefix lookup increments node hit_count."""
+        cache = RadixCache(
+            req_to_token_pool=None, token_to_kv_pool_allocator=None, page_size=1
+        )
+
+        key = RadixKey([1, 2, 3])
+        value = torch.tensor([10, 20, 30], dtype=torch.int64)
+        cache.insert(key, value)
+
+        result = cache.match_prefix(RadixKey([1, 2, 3]))
+        node = result.last_device_node
+        self.assertEqual(node.hit_count, 1)
+        self.assertEqual(cache.root_node.hit_count, 0)
+
+        _ = cache.match_prefix(RadixKey([1, 2, 3]))
+        self.assertEqual(node.hit_count, 2)
+
+    def test_chunked_insert_does_not_increment_hit_count(self):
+        """Chunked inserts should not skew hit counters."""
+        cache = RadixCache(
+            req_to_token_pool=None, token_to_kv_pool_allocator=None, page_size=1
+        )
+
+        key = RadixKey([1, 2])
+        value = torch.tensor([10, 20], dtype=torch.int64)
+        cache.insert(key, value)
+
+        node = cache.root_node.children[1]
+        self.assertEqual(node.hit_count, 0)
+
+        cache.insert(RadixKey([1, 2]), torch.tensor([10, 20], dtype=torch.int64), chunked=True)
+        self.assertEqual(node.hit_count, 0)
+
+        cache.match_prefix(RadixKey([1, 2]))
+        self.assertEqual(node.hit_count, 1)
+
+    def test_hit_count_preserved_on_split(self):
+        """Splitting nodes should carry over historical hit_count."""
+        cache = RadixCache(
+            req_to_token_pool=None, token_to_kv_pool_allocator=None, page_size=1
+        )
+
+        seq = [1, 2, 3, 4]
+        cache.insert(RadixKey(seq), torch.tensor([10, 20, 30, 40], dtype=torch.int64))
+
+        cache.match_prefix(RadixKey(seq))
+
+        cache.match_prefix(RadixKey([1, 2, 9, 10]))
+
+        prefix_node = cache.root_node.children[1]
+        child = prefix_node.children[3]
+
+        self.assertEqual(prefix_node.key.token_ids, [1, 2])
+        self.assertEqual(prefix_node.hit_count, 2)
+        self.assertEqual(child.hit_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
