@@ -323,7 +323,11 @@ class RadixCache(BasePrefixCache):
         if len(key) == 0:
             return empty_match_result()
 
-        value, last_node = self._match_prefix_helper(self.root_node, key)
+        chunked = kwargs.pop("chunked", False)
+
+        value, last_node = self._match_prefix_helper(
+            self.root_node, key, chunked=chunked
+        )
         if value:
             value = torch.cat(value)
         else:
@@ -347,7 +351,7 @@ class RadixCache(BasePrefixCache):
             # Make sure the value len equal to the EAGLE bigram key len
             value = value[: len(key)]
 
-        return self._insert_helper(self.root_node, key, value)
+        return self._insert_helper(self.root_node, key, value, chunked=chunked)
 
     def cache_finished_req(self, req: Req, is_insert: bool = True):
         """Cache request when it finishes."""
@@ -641,7 +645,19 @@ class RadixCache(BasePrefixCache):
 
     ##### Internal Helper Functions #####
 
-    def _match_prefix_helper(self, node: TreeNode, key: RadixKey):
+    def _inc_hit_count(self, node: TreeNode, chunked: bool = False):
+        # Chunked prefill paths may probe repeatedly; skip counting to avoid skew.
+        if chunked:
+            return
+        if node is None or node == self.root_node:
+            return
+        if node.evicted:
+            return
+        node.hit_count += 1
+
+    def _match_prefix_helper(
+        self, node: TreeNode, key: RadixKey, chunked: bool = False
+    ):
         access_time = time.monotonic()
         node.last_access_time = access_time
 
@@ -655,10 +671,12 @@ class RadixCache(BasePrefixCache):
             if prefix_len < len(child.key):
                 new_node = self._split_node(child.key, child, prefix_len)
                 value.append(new_node.value)
+                self._inc_hit_count(new_node, chunked)
                 node = new_node
                 break
             else:
                 value.append(child.value)
+                self._inc_hit_count(child, chunked)
                 node = child
                 key = key[prefix_len:]
 
@@ -676,6 +694,7 @@ class RadixCache(BasePrefixCache):
         new_node.lock_ref = child.lock_ref
         new_node.key = child.key[:split_len]
         new_node.value = child.value[:split_len]
+        new_node.hit_count = child.hit_count
         child.parent = new_node
         child.key = child.key[split_len:]
         child.value = child.value[split_len:]
@@ -686,7 +705,7 @@ class RadixCache(BasePrefixCache):
 
         return new_node
 
-    def _insert_helper(self, node: TreeNode, key: RadixKey, value):
+    def _insert_helper(self, node: TreeNode, key: RadixKey, value, chunked: bool = False):
         access_time = time.monotonic()
         node.last_access_time = access_time
         if len(key) == 0:
@@ -706,6 +725,9 @@ class RadixCache(BasePrefixCache):
             if prefix_len < len(node.key):
                 new_node = self._split_node(node.key, node, prefix_len)
                 node = new_node
+                self._inc_hit_count(node, chunked)
+            else:
+                self._inc_hit_count(node, chunked)
 
             if len(key):
                 child_key = self.get_child_key_fn(key)
