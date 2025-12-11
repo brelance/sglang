@@ -77,8 +77,6 @@ from sglang.srt.managers.io_struct import (
     ExpertDistributionReq,
     ExpertDistributionReqOutput,
     ExpertDistributionReqType,
-    DumpRadixTraceReqInput,
-    DumpRadixTraceReqOutput,
     FlushCacheReqInput,
     FlushCacheReqOutput,
     FreezeGCReq,
@@ -154,10 +152,8 @@ from sglang.srt.mem_cache.chunk_cache import ChunkCache, SWAChunkCache
 from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
 from sglang.srt.mem_cache.mamba_radix_cache import MambaRadixCache
-from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey
-from sglang.srt.mem_cache.radix_tree_tracer import DEFAULT_TRACE_PATH
+from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
-from sglang.srt.loggers.radix_moe_logger import get_radix_moe_logger
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.multiplex.multiplexing_mixin import SchedulerMultiplexMixin
 from sglang.srt.parser.reasoning_parser import ReasoningParser
@@ -278,7 +274,6 @@ class Scheduler(
         self.page_size = server_args.page_size
         self.enable_hierarchical_cache = server_args.enable_hierarchical_cache
         self.enable_hicache_storage = server_args.hicache_storage_backend is not None
-        self.radix_moe_logger = get_radix_moe_logger()
 
         # Distributed rank info
         self.attn_tp_rank, self.attn_tp_size, self.attn_dp_rank = (
@@ -542,7 +537,6 @@ class Scheduler(
                 (BatchTokenizedGenerateReqInput, self.handle_batch_generate_request),
                 (BatchTokenizedEmbeddingReqInput, self.handle_batch_embedding_request),
                 (FlushCacheReqInput, self.flush_cache_wrapped),
-                (DumpRadixTraceReqInput, self.dump_radix_trace_wrapped),
                 (ClearHiCacheReqInput, self.clear_hicache_storage_wrapped),
                 (AbortReq, self.abort_request),
                 (OpenSessionReqInput, self.open_session),
@@ -2228,51 +2222,6 @@ class Scheduler(
     def flush_cache_wrapped(self, recv_req: FlushCacheReqInput):
         success = self.flush_cache()
         return FlushCacheReqOutput(success=success)
-
-    def dump_radix_trace_wrapped(self, recv_req: DumpRadixTraceReqInput):
-        # Only dump once per model parallel group to avoid file contention
-        if self.tp_rank != 0 or (self.dp_rank is not None and self.dp_rank != 0):
-            return DumpRadixTraceReqOutput(
-                success=True,
-                path=recv_req.path,
-                message="skip_non_primary_rank",
-            )
-
-        meta = recv_req.meta or {}
-        # Avoid mutating caller-supplied dictionary
-        meta = dict(meta)
-        meta.update(
-            {
-                "tp_rank": self.tp_rank,
-                "dp_rank": self.dp_rank,
-                "pp_rank": self.pp_rank,
-            }
-        )
-
-        target_path = getattr(self.server_args, "radix_tree_trace_path", None) or (
-            recv_req.path or DEFAULT_TRACE_PATH
-        )
-
-        try:
-            if hasattr(self.tree_cache, "dump_trace"):
-                self.tree_cache.dump_trace(path=target_path, meta=meta)
-                return DumpRadixTraceReqOutput(
-                    success=True,
-                    path=target_path,
-                    message="",
-                )
-            return DumpRadixTraceReqOutput(
-                success=False,
-                path=target_path,
-                message="tree_cache_has_no_dump_trace",
-            )
-        except Exception as e:
-            logger.exception("Failed to dump radix tree trace")
-            return DumpRadixTraceReqOutput(
-                success=False,
-                path=target_path,
-                message=str(e),
-            )
 
     def clear_hicache_storage_wrapped(self, recv_req: ClearHiCacheReqInput):
         if self.enable_hierarchical_cache:
